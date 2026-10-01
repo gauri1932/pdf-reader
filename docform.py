@@ -1,87 +1,61 @@
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-# from sentence_transformers import SentenceTransformer
-from langchain_chroma import Chroma
-# from langchain_google_genai import ChatGoogleGenerativeAI
+import sys
+from pathlib import Path
+
 from dotenv import load_dotenv
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-data = PyPDFLoader("./data/cnv1.pdf")
-document=data.load()
-# print((document[200]))
-# print(len(document))
+ROOT = Path(__file__).parent
+PDF = ROOT / "data" / "cnv1.pdf"
+DB = ROOT / "chroma_db"
+MODEL = "openai/gpt-oss-120b"
 
-texts_splitter=RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=200    # we need over lap because a sentence might cut in between two chunks resulting in not proper chunks
-)
-
-chunks=texts_splitter.split_documents(document)
-# print(len(chunks))
-
-# texts = [doc.page_content for doc in chunks]
-embedding= HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-mpnet-base-v2"
-)
-
-# embeddings = embedding.embed_documents(texts)
-
-# model = SentenceTransformer(
-#     "sentence-transformers/all-mpnet-base-v2"
-# )
-
-# embeddings = model.encode(texts)
-# print(len(embeddings))     
-# If you're learning how embeddings work	Use
-# Understand the embedding model itself	SentenceTransformer(...).encode()
-# Build a LangChain RAG pipeline	HuggingFaceEmbeddings(...).embed_documents()
-
-# print(embeddings[0])
-
-vector_store = Chroma(
-    collection_name="vectorDB",
-    embedding_function=embedding,
-    persist_directory="./chroma_db"
-)
-vector_store.add_documents(chunks)    # embedd the document internally no need for finding embeddings alag se
-
-retriever=vector_store.as_retriever(
-    search_kwargs={"k":2}
-)
-query="What is Strong AI?"
-
-docs=retriever.invoke(query)
-# print(docs)
-# print(type(docs))
-
-load_dotenv()
-
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    temperature=0
-)
-
-context="\n\n".join(doc.page_content for doc in docs)
-
-prompt=f"""
-Answer the question using only the context below
+PROMPT = """Answer the question using only the context below.
+If you don't know the answer, just say "I don't know".
 
 Context:
 {context}
 
-Question:
-{query}
+Question: {query}
 
-Answer:
-"""
+Answer:"""
 
-# response=llm.invoke(prompt)
-# print(response.content)
 
-import os
-from dotenv import load_dotenv
+def build_store() -> Chroma:
+    if not PDF.exists():
+        raise FileNotFoundError(f"No PDF found at {PDF}")
 
-load_dotenv()
+    store = Chroma(
+        collection_name="vectorDB",
+        embedding_function=HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-mpnet-base-v2"
+        ),
+        persist_directory=str(DB),
+    )
 
-print(os.getenv("GROQ_API_KEY") is not None)
+    if not store.get()["ids"]:
+        chunks = RecursiveCharacterTextSplitter(
+            chunk_size=1000, chunk_overlap=150
+        ).split_documents(PyPDFLoader(str(PDF)).load())
+        store.add_documents(chunks)
+        print(f"Indexed {len(chunks)} chunks from {PDF.name}")
+
+    return store
+
+
+def ask(query: str) -> str:
+    docs = build_store().as_retriever(search_kwargs={"k": 4}).invoke(query)
+    context = "\n\n".join(d.page_content for d in docs)
+
+    llm = ChatGroq(model=MODEL, temperature=0)
+    return llm.invoke(PROMPT.format(context=context, query=query)).content
+
+
+if __name__ == "__main__":
+    load_dotenv(ROOT / ".env")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    question = " ".join(sys.argv[1:]) or "Explain strong AI"
+    print(ask(question))
